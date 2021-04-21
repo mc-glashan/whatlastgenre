@@ -62,6 +62,12 @@ class WhatLastGenre(object):
         self.daprs = self.init_dataproviders()
         self.whitelist = self.read_whitelist()
         self.tags = self.read_tagsfile()
+        # test alias resolution
+        taglib = TagLib(self.conf, self.whitelist, self.tags)
+        for key, val in self.tags['alias']:
+            if taglib.resolve(key) not in self.whitelist:
+                self.stat_message(logging.WARN, 'alias not resolved',
+                                  '%s -> %s' % (key, val), 2)
 
     def read_whitelist(self, path=None):
         """Read the whitelist trying different paths.
@@ -109,10 +115,6 @@ class WhatLastGenre(object):
         if any(s not in tagsfile.keys()
                for s in ['upper', 'alias', 'regex']):
             raise RuntimeError('missing section in tagsfile: %s' % path)
-        for key, val in tagsfile['alias']:
-            if val not in self.whitelist:
-                self.stat_message(logging.WARN, 'alias not whitelisted',
-                                  '%s -> %s' % (key, val), 2)
         regex = []
         for pat, repl in [(r'( *[,;.:\\/&_]+ *| and )+', '/'),
                           (r'[\'"]+', ''), (r'  +', ' ')]:
@@ -432,7 +434,7 @@ class TagLib(object):
         self.log = logging.getLogger(__name__)
         self.conf = conf
         self.whitelist = whitelist
-        self.aliases = tags['alias']
+        self.aliases = dict(tags['alias'])
         self.regexes = tags['regex']
         self.upper = tags['upper']
         self.taggrps = {'artist': defaultdict(float),
@@ -500,30 +502,26 @@ class TagLib(object):
         """Try to resolve a tag to a valid whitelisted tag by using
         aliases, regex replacements and optional difflib matching.
         """
-
-        def alias(key):
-            """Return whether a key got an alias and log it if True."""
-            if key in self.aliases:
-                self.log.debug('tag alias   %s -> %s', key,
-                               self.aliases[key])
-                return True
-            return False
-
+        # whitelist
+        if key in self.whitelist:
+            return key
+        # canonical
+        # TODO: Add c14n
         # alias
-        if alias(key):
-            return self.aliases[key]
+        if key in self.aliases:
+            key = self.aliases[key]
+            return self.resolve(key)
         # regex
         if any(r[0].search(key) for r in self.regexes):
             for pat, repl in self.regexes:
                 if pat.search(key):
                     key_ = key
                     key = pat.sub(repl, key)
-                    self.log.debug('tag replace %s -> %s (%s)',
-                                   key_, key, pat.pattern)
-            # key got replaced, try alias again
-            if alias(key):
-                return self.aliases[key]
-            return key
+                    if key_ != key:
+                        self.log.debug('tag replace %s -> %s (%s)',
+                                    key_, key, pat.pattern)
+                        # key got replaced, try resolve again
+                        return self.resolve(key)
         return key
 
     def difflib_matching(self, tags):
