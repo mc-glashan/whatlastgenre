@@ -498,30 +498,32 @@ class TagLib(object):
                        max(tags.values()), len(tags))
         return tags
 
-    def resolve(self, key):
+    def resolve(self, key, old=None, level=0):
         """Try to resolve a tag to a valid whitelisted tag by using
         aliases, regex replacements and optional difflib matching.
         """
         # whitelist
         if key in self.whitelist:
             return key
+        level=level+1
+        if level > 5:
+            return key
         # canonical
         # TODO: Add c14n
         # alias
         if key in self.aliases:
-            key = self.aliases[key]
-            return self.resolve(key)
+            new = self.aliases[key]
+            return self.resolve(new, key, level)
         # regex
         if any(r[0].search(key) for r in self.regexes):
             for pat, repl in self.regexes:
                 if pat.search(key):
-                    key_ = key
-                    key = pat.sub(repl, key)
-                    if key_ != key:
+                    new = pat.sub(repl, key)
+                    if new != key and new != old:
                         self.log.debug('tag replace %s -> %s (%s)',
-                                    key_, key, pat.pattern)
+                                    key, new, pat.pattern)
                         # key got replaced, try resolve again
-                        return self.resolve(key)
+                        return self.resolve(new, key, level)
         return key
 
     def difflib_matching(self, tags):
