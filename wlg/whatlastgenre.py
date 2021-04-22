@@ -24,6 +24,7 @@ from __future__ import absolute_import, division, print_function, \
     unicode_literals
 
 import argparse
+import codecs
 import configparser
 import itertools
 import logging
@@ -32,8 +33,10 @@ import operator
 import os
 import pkgutil
 import re
+import six
 import sys
 import time
+import yaml
 from collections import defaultdict, Counter, namedtuple
 from datetime import timedelta
 
@@ -62,8 +65,9 @@ class WhatLastGenre(object):
         self.daprs = self.init_dataproviders()
         self.whitelist = self.read_whitelist()
         self.tags = self.read_tagsfile()
+        self.tree = self.read_treefile()
         # test alias resolution
-        taglib = TagLib(self.conf, self.whitelist, self.tags)
+        taglib = TagLib(self.conf, self.whitelist, self.tags, self.tree)
         for key, val in self.tags['alias']:
             if taglib.resolve(key) not in self.whitelist:
                 self.stat_message(logging.WARN, 'alias not resolved',
@@ -125,6 +129,28 @@ class WhatLastGenre(object):
         self.log.debug('tagsfile:  %s (%d items)', path,
                        sum(len(v) for v in tagsfile.values()))
         return tagsfile
+
+    def read_treefile(self, path=None):
+        """Read the treefile trying different paths.
+
+        Return a dict of prepared data from the treefile.
+        """
+        tree = []
+        if not path:
+            if self.conf.has_option('wlg', 'canonical'):
+                if self.conf.get('wlg', 'canonical'):
+                    path = self.conf.get('wlg', 'canonical')
+                elif os.path.exists(os.path.join(self.conf.path, 'tree.yaml')):
+                    path = os.path.join(self.conf.path, 'tree.yaml')
+                else:
+                    path = 'data/tree.yaml'
+        # Read the tree
+        if path:
+            self.log.debug('Loading canonicalization tree %s', path)
+            with codecs.open(path, 'r', encoding='utf-8') as f:
+                genres_tree = yaml.safe_load(f)
+            flatten_tree(genres_tree, [], tree)
+        return tree
 
     def init_dataproviders(self):
         """Initializes the DataProviders activated in the conf file."""
@@ -190,7 +216,7 @@ class WhatLastGenre(object):
                       metadata.type, metadata.albumartist[0], metadata.album,
                       metadata.year, (" (%d artists)" % num_artists
                                       if num_artists > 1 else ''))
-        taglib = TagLib(self.conf, self.whitelist, self.tags)
+        taglib = TagLib(self.conf, self.whitelist, self.tags, self.tree)
         release = None
         for query in self.create_queries(metadata):
             if not query.str:
@@ -430,7 +456,7 @@ class WhatLastGenre(object):
 class TagLib(object):
     """Class to handle tags."""
 
-    def __init__(self, conf, whitelist, tags):
+    def __init__(self, conf, whitelist, tags, tree=None):
         self.log = logging.getLogger(__name__)
         self.conf = conf
         self.whitelist = whitelist
@@ -440,6 +466,7 @@ class TagLib(object):
         self.taggrps = {'artist': defaultdict(float),
                         'album': defaultdict(float),
                         'various': defaultdict(float)}
+        self.tree = tree
 
     def add(self, tags, group, split=False):
         """Add scored tags to a group of tags.
@@ -509,7 +536,14 @@ class TagLib(object):
         if level > 5:
             return key
         # canonical
-        # TODO: Add c14n
+        candidates = find_parents(key, self.tree)
+        if candidates:
+            self.log.info('candidates: %s', candidates)
+            if len(candidates) > 1:
+                new = candidates[1]
+                if new != key:
+                    self.log.info('candidate: %s', new)
+                    return self.resolve(new, key, level)
         # alias
         if key in self.aliases:
             new = self.aliases[key]
@@ -545,8 +579,11 @@ class TagLib(object):
                 # some exceptions (move to tagsfile if it gets longer)
                 return True
             if key in self.whitelist:
-                if '&' in key or key.startswith('nu '):
-                    return True
+                return True
+                #if '&' in key or key.startswith('nu '):
+                #    return True
+            if find_parents(key, self.tree):
+                return True
             return False
 
         keys = []
@@ -878,3 +915,34 @@ def main():
     except KeyboardInterrupt:
         print()
     wlg.print_stats(i)
+
+# Canonicalization tree processing.
+
+def flatten_tree(elem, path, branches):
+    """Flatten nested lists/dictionaries into lists of strings
+    (branches).
+    """
+    if not path:
+        path = []
+
+    if isinstance(elem, dict):
+        for (k, v) in elem.items():
+            flatten_tree(v, path + [k], branches)
+    elif isinstance(elem, list):
+        for sub in elem:
+            flatten_tree(sub, path, branches)
+    else:
+        branches.append(path + [six.text_type(elem)])
+
+
+def find_parents(candidate, branches):
+    """Find parents genre of a given genre, ordered from the closest to
+    the further parent.
+    """
+    for branch in branches:
+        try:
+            idx = branch.index(candidate.lower())
+            return list(reversed(branch[:idx + 1]))
+        except ValueError:
+            continue
+    return [candidate]
